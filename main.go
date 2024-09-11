@@ -11,6 +11,7 @@ import (
 const storageDir = "./storage"
 
 func main() {
+	http.HandleFunc("/create-bucket", createBucketHandler)
 	http.HandleFunc("/upload", uploadHandler)
 	http.HandleFunc("/download", downloadHandler)
 	http.HandleFunc("/list", listHandler)
@@ -21,9 +22,37 @@ func main() {
 	}
 }
 
+func createBucketHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
+		return
+	}
+
+	bucketName := r.URL.Query().Get("bucket")
+	if bucketName == "" {
+		http.Error(w, "Bucket name is required", http.StatusBadRequest)
+		return
+	}
+
+	bucketPath := filepath.Join(storageDir, bucketName)
+	if err := os.MkdirAll(bucketPath, os.ModePerm); err != nil {
+		http.Error(w, "Failed to create bucket", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "Bucket created successfully: %s\n", bucketName)
+}
+
 func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
+		return
+	}
+
+	bucketName := r.URL.Query().Get("bucket")
+	if bucketName == "" {
+		http.Error(w, "Bucket name is required", http.StatusBadRequest)
 		return
 	}
 
@@ -34,8 +63,13 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	os.MkdirAll(storageDir, os.ModePerm)
-	dst, err := os.Create(filepath.Join(storageDir, header.Filename))
+	bucketPath := filepath.Join(storageDir, bucketName)
+	if _, err := os.Stat(bucketPath); os.IsNotExist(err) {
+		http.Error(w, "Bucket does not exist", http.StatusBadRequest)
+		return
+	}
+
+	dst, err := os.Create(filepath.Join(bucketPath, header.Filename))
 	if err != nil {
 		http.Error(w, "Failed to create file", http.StatusInternalServerError)
 		return
@@ -57,13 +91,14 @@ func downloadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	bucketName := r.URL.Query().Get("bucket")
 	filename := r.URL.Query().Get("filename")
-	if filename == "" {
-		http.Error(w, "Filename is required", http.StatusBadRequest)
+	if bucketName == "" || filename == "" {
+		http.Error(w, "Bucket name and filename are required", http.StatusBadRequest)
 		return
 	}
 
-	filePath := filepath.Join(storageDir, filename)
+	filePath := filepath.Join(storageDir, bucketName, filename)
 	file, err := os.Open(filePath)
 	if err != nil {
 		http.Error(w, "File not found", http.StatusNotFound)
@@ -85,7 +120,14 @@ func listHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	files, err := os.ReadDir(storageDir)
+	bucketName := r.URL.Query().Get("bucket")
+	if bucketName == "" {
+		http.Error(w, "Bucket name is required", http.StatusBadRequest)
+		return
+	}
+
+	bucketPath := filepath.Join(storageDir, bucketName)
+	files, err := os.ReadDir(bucketPath)
 	if err != nil {
 		http.Error(w, "Failed to list files", http.StatusInternalServerError)
 		return
