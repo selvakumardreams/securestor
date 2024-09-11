@@ -1,6 +1,9 @@
 package main
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,16 +12,17 @@ import (
 )
 
 const storageDir = "./storage"
+const encryptionKey = "Yf90Frf3DorOqeDfK4VGRIeQfGKUgkle" // 32 bytes key for AES-256
 
 // List of buckets for replication
 var replicationBuckets = []string{"replica1", "replica2"}
 
 func main() {
-	http.HandleFunc("/create-bucket", createBucketHandler)
-	http.HandleFunc("/upload", uploadHandler)
-	http.HandleFunc("/download", downloadHandler)
-	http.HandleFunc("/list", listHandler)
-	http.HandleFunc("/delete", deleteHandler) // DELETE method
+	http.HandleFunc("/create-bucket", createBucketHandler) // create a new bucket
+	http.HandleFunc("/upload", uploadHandler)              // upload a file to a bucket
+	http.HandleFunc("/download", downloadHandler)          // download a file from a bucket
+	http.HandleFunc("/list", listHandler)                  // List files in a bucket
+	http.HandleFunc("/delete", deleteHandler)              // Delete a file from a bucket
 
 	fmt.Println("Starting server on :8080...")
 	if err := http.ListenAndServe(":8080", nil); err != nil {
@@ -76,7 +80,21 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	// Save file to the main bucket
+	// Read file content
+	fileBytes, err := io.ReadAll(file)
+	if err != nil {
+		http.Error(w, "Failed to read file", http.StatusInternalServerError)
+		return
+	}
+
+	// Encrypt file content
+	encryptedBytes, err := encrypt(fileBytes, encryptionKey)
+	if err != nil {
+		http.Error(w, "Failed to encrypt file", http.StatusInternalServerError)
+		return
+	}
+
+	// Save encrypted file to the main bucket
 	bucketPath := filepath.Join(storageDir, bucketName)
 	if _, err := os.Stat(bucketPath); os.IsNotExist(err) {
 		http.Error(w, "Bucket does not exist", http.StatusBadRequest)
@@ -90,19 +108,19 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer dst.Close()
 
-	if _, err := io.Copy(dst, file); err != nil {
+	if _, err := dst.Write(encryptedBytes); err != nil {
 		http.Error(w, "Failed to save file", http.StatusInternalServerError)
 		return
 	}
 
 	// Asynchronously replicate the file to the replica buckets
-	go replicateFile(bucketName, header.Filename, file)
+	go replicateFile(bucketName, header.Filename, encryptedBytes)
 
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(w, "File uploaded successfully: %s\n", header.Filename)
 }
 
-func replicateFile(bucketName, filename string, file io.Reader) {
+func replicateFile(bucketName, filename string, fileBytes []byte) {
 	for _, replica := range replicationBuckets {
 		replicaPath := filepath.Join(storageDir, replica, bucketName)
 		if _, err := os.Stat(replicaPath); os.IsNotExist(err) {
@@ -117,7 +135,7 @@ func replicateFile(bucketName, filename string, file io.Reader) {
 		}
 		defer replicaDst.Close()
 
-		if _, err := io.Copy(replicaDst, file); err != nil {
+		if _, err := replicaDst.Write(fileBytes); err != nil {
 			fmt.Printf("Failed to save file in replica bucket %s: %v\n", replica, err)
 		}
 	}
@@ -144,9 +162,23 @@ func downloadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
+	// Read encrypted file content
+	encryptedBytes, err := io.ReadAll(file)
+	if err != nil {
+		http.Error(w, "Failed to read file", http.StatusInternalServerError)
+		return
+	}
+
+	// Decrypt file content
+	decryptedBytes, err := decrypt(encryptedBytes, encryptionKey)
+	if err != nil {
+		http.Error(w, "Failed to decrypt file", http.StatusInternalServerError)
+		return
+	}
+
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s", filename))
 	w.Header().Set("Content-Type", "application/octet-stream")
-	if _, err := io.Copy(w, file); err != nil {
+	if _, err := w.Write(decryptedBytes); err != nil {
 		http.Error(w, "Failed to download file", http.StatusInternalServerError)
 		return
 	}
@@ -213,4 +245,39 @@ func deleteHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(w, "File deleted successfully: %s\n", filename)
+}
+
+func encrypt(data []byte, passphrase string) ([]byte, error) {
+	block, _ := aes.NewCipher([]byte(passphrase))
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, err
+	}
+	ciphertext := gcm.Seal(nonce, nonce, data, nil)
+	return ciphertext, nil
+}
+
+func decrypt(data []byte, passphrase string) ([]byte, error) {
+	block, err := aes.NewCipher([]byte(passphrase))
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	nonceSize := gcm.NonceSize()
+	if len(data) < nonceSize {
+		return nil, fmt.Errorf("ciphertext too short")
+	}
+	nonce, ciphertext := data[:nonceSize], data[nonceSize:]
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return nil, err
+	}
+	return plaintext, nil
 }
