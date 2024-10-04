@@ -1,67 +1,16 @@
-package main
+package handlers
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+
+	"github.com/selvakumardreams/bluenoise/internal/utils"
 )
 
-const storageDir = "./storage"
-const encryptionKey = "Yf90Frf3DorOqeDfK4VGRIeQfGKUgkle" // 32 bytes key for AES-256
-
-// List of buckets for replication
-var replicationBuckets = []string{"replica1", "replica2"}
-
-func main() {
-	http.HandleFunc("/create-bucket", createBucketHandler) // create a new bucket
-	http.HandleFunc("/upload", uploadHandler)              // upload a file to a bucket
-	http.HandleFunc("/download", downloadHandler)          // download a file from a bucket
-	http.HandleFunc("/list", listHandler)                  // List files in a bucket
-	http.HandleFunc("/delete", deleteHandler)              // Delete a file from a bucket
-
-	fmt.Println("Starting server on :8080...")
-	if err := http.ListenAndServe(":8080", nil); err != nil {
-		fmt.Printf("Error starting server: %v\n", err)
-	}
-}
-
-func createBucketHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
-		return
-	}
-
-	bucketName := r.URL.Query().Get("bucket")
-	if bucketName == "" {
-		http.Error(w, "Bucket name is required", http.StatusBadRequest)
-		return
-	}
-
-	bucketPath := filepath.Join(storageDir, bucketName)
-	if err := os.MkdirAll(bucketPath, os.ModePerm); err != nil {
-		http.Error(w, "Failed to create bucket", http.StatusInternalServerError)
-		return
-	}
-
-	// Replicate the bucket
-	for _, replica := range replicationBuckets {
-		replicaPath := filepath.Join(storageDir, replica, bucketName)
-		if err := os.MkdirAll(replicaPath, os.ModePerm); err != nil {
-			http.Error(w, "Failed to create replica bucket", http.StatusInternalServerError)
-			return
-		}
-	}
-
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, "Bucket created successfully: %s\n", bucketName)
-}
-
-func uploadHandler(w http.ResponseWriter, r *http.Request) {
+func UploadHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
 		return
@@ -88,7 +37,7 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Encrypt file content
-	encryptedBytes, err := encrypt(fileBytes, encryptionKey)
+	encryptedBytes, err := utils.Encrypt(fileBytes, utils.EncryptionKey)
 	if err != nil {
 		http.Error(w, "Failed to encrypt file", http.StatusInternalServerError)
 		return
@@ -114,34 +63,13 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Asynchronously replicate the file to the replica buckets
-	go replicateFile(bucketName, header.Filename, encryptedBytes)
+	go utils.ReplicateFile(bucketName, header.Filename, encryptedBytes)
 
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(w, "File uploaded successfully: %s\n", header.Filename)
 }
 
-func replicateFile(bucketName, filename string, fileBytes []byte) {
-	for _, replica := range replicationBuckets {
-		replicaPath := filepath.Join(storageDir, replica, bucketName)
-		if _, err := os.Stat(replicaPath); os.IsNotExist(err) {
-			fmt.Printf("Replica bucket %s does not exist\n", replica)
-			continue
-		}
-
-		replicaDst, err := os.Create(filepath.Join(replicaPath, filename))
-		if err != nil {
-			fmt.Printf("Failed to create file in replica bucket %s: %v\n", replica, err)
-			continue
-		}
-		defer replicaDst.Close()
-
-		if _, err := replicaDst.Write(fileBytes); err != nil {
-			fmt.Printf("Failed to save file in replica bucket %s: %v\n", replica, err)
-		}
-	}
-}
-
-func downloadHandler(w http.ResponseWriter, r *http.Request) {
+func DownloadHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
 		return
@@ -170,7 +98,7 @@ func downloadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Decrypt file content
-	decryptedBytes, err := decrypt(encryptedBytes, encryptionKey)
+	decryptedBytes, err := utils.Decrypt(encryptedBytes, utils.EncryptionKey)
 	if err != nil {
 		http.Error(w, "Failed to decrypt file", http.StatusInternalServerError)
 		return
@@ -184,7 +112,7 @@ func downloadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func listHandler(w http.ResponseWriter, r *http.Request) {
+func ListHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
 		return
@@ -208,7 +136,7 @@ func listHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func deleteHandler(w http.ResponseWriter, r *http.Request) {
+func DeleteHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodDelete {
 		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
 		return
@@ -245,39 +173,4 @@ func deleteHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(w, "File deleted successfully: %s\n", filename)
-}
-
-func encrypt(data []byte, passphrase string) ([]byte, error) {
-	block, _ := aes.NewCipher([]byte(passphrase))
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
-		return nil, err
-	}
-	ciphertext := gcm.Seal(nonce, nonce, data, nil)
-	return ciphertext, nil
-}
-
-func decrypt(data []byte, passphrase string) ([]byte, error) {
-	block, err := aes.NewCipher([]byte(passphrase))
-	if err != nil {
-		return nil, err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	nonceSize := gcm.NonceSize()
-	if len(data) < nonceSize {
-		return nil, fmt.Errorf("ciphertext too short")
-	}
-	nonce, ciphertext := data[:nonceSize], data[nonceSize:]
-	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
-	if err != nil {
-		return nil, err
-	}
-	return plaintext, nil
 }

@@ -1,4 +1,4 @@
-module github.com/selvakumardreams/bluenoise/cli
+module github.com/selvakumardreams/bluenoise
 
 go 1.23.0
 
