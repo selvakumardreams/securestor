@@ -8,12 +8,14 @@ import (
 )
 
 func main() {
-	http.HandleFunc("/create-bucket", corsMiddleware(handlers.CreateBucketHandler)) // create a new bucket
-	http.HandleFunc("/upload", corsMiddleware(handlers.UploadHandler))              // upload a file to a bucket
-	http.HandleFunc("/download", corsMiddleware(handlers.DownloadHandler))          // download a file from a bucket
-	http.HandleFunc("/list", corsMiddleware(handlers.ListHandler))                  // List files in a bucket
-	http.HandleFunc("/delete", corsMiddleware(handlers.DeleteHandler))              // Delete a file from a bucket
-	http.HandleFunc("/health", corsMiddleware(handlers.HealthCheckHandler))         // Health check
+	http.HandleFunc("/create-bucket", corsMiddleware(handlers.CreateBucketHandler))           // create a new bucket
+	http.HandleFunc("/upload", corsMiddleware(handlers.UploadHandler))                        // upload a file to a bucket
+	http.HandleFunc("/download", corsMiddleware(handlers.DownloadHandler))                    // download a file from a bucket
+	http.HandleFunc("/list", corsMiddleware(handlers.ListHandler))                            // List files in a bucket
+	http.HandleFunc("/delete", corsMiddleware(handlers.DeleteHandler))                        // Delete a file from a bucket
+	http.HandleFunc("/health", corsMiddleware(handlers.HealthCheckHandler))                   // Health check
+	http.HandleFunc("/search", corsMiddleware(handlers.SearchHandler))                        // Search for a file in a bucket
+	http.HandleFunc("/update-metadata", corsMiddleware(handlers.UpdateCustomMetadataHandler)) // Update custom metadata
 
 	// Serve static files
 	fs := http.FileServer(http.Dir("./static"))

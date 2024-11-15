@@ -31,3 +31,27 @@ curl -O "http://localhost:8080/download?bucket=mybucket&filename=yourfile"
 ```
 curl "http://localhost:8080/list?bucket=mybucket"
 ```
+
+6. To add / update / delete custom metadata, send a POST request to /update-metadata with the following JSON body:
+
+```
+{
+    "id": "file-id",
+    "custom_metadata": {
+        "newKey": "newValue"
+    },
+    "action": "add"
+}
+```
+```
+{
+    "id": "file-id",
+    "custom_metadata": {
+        "keyToDelete": ""
+    },
+    "action": "delete"
+}
+```
+```
+curl "http://localhost:8080/update-metadata"
+```

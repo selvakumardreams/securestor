@@ -1,14 +1,157 @@
 package handlers
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/selvakumardreams/bluenoise/internal/utils"
 )
+
+type FileMetadata struct {
+	ID             string            `json:"id"`
+	Filename       string            `json:"filename"`
+	BucketName     string            `json:"bucket_name"`
+	UploadTime     string            `json:"upload_time"`
+	ContentType    string            `json:"content_type"`
+	Size           int64             `json:"size"`
+	Hash           string            `json:"hash"`
+	Owner          string            `json:"owner"`
+	Tags           []string          `json:"tags"`
+	Description    string            `json:"description"`
+	Version        string            `json:"version"`
+	Permissions    string            `json:"permissions"`
+	Checksum       string            `json:"checksum"`
+	LastAccessed   string            `json:"last_accessed"`
+	Expiration     string            `json:"expiration"`
+	CustomMetadata map[string]string `json:"custom_metadata"`
+}
+
+type CustomMetadataRequest struct {
+	ID             string            `json:"id"`
+	CustomMetadata map[string]string `json:"custom_metadata"`
+	Action         string            `json:"action"` // "add", "update", "delete"
+}
+
+var metadataFile = filepath.Join("storage", "metadata.json")
+
+func computeHash(data []byte) string {
+	hash := sha256.Sum256(data)
+	return hex.EncodeToString(hash[:])
+}
+
+func generateUniqueID() string {
+	return uuid.New().String()
+}
+
+func saveMetadata(metadata FileMetadata) error {
+	var metadataList []FileMetadata
+
+	// Ensure the storage directory exists
+	if err := os.MkdirAll(filepath.Dir(metadataFile), os.ModePerm); err != nil {
+		return err
+	}
+
+	// Read existing metadata
+	file, err := os.Open(metadataFile)
+	if err == nil {
+		defer file.Close()
+		if err := json.NewDecoder(file).Decode(&metadataList); err != nil {
+			return err
+		}
+	}
+
+	// Append new metadata
+	metadataList = append(metadataList, metadata)
+
+	// Write updated metadata
+	file, err = os.Create(metadataFile)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	return json.NewEncoder(file).Encode(metadataList)
+}
+
+func UpdateCustomMetadataHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req CustomMetadataRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	var metadataList []FileMetadata
+
+	// Read existing metadata
+	file, err := os.Open(metadataFile)
+	if err != nil {
+		http.Error(w, "Failed to read metadata", http.StatusInternalServerError)
+		return
+	}
+	defer file.Close()
+
+	if err := json.NewDecoder(file).Decode(&metadataList); err != nil {
+		http.Error(w, "Failed to decode metadata", http.StatusInternalServerError)
+		return
+	}
+
+	// Find the specific file's metadata
+	var updated bool
+	for i, metadata := range metadataList {
+		if metadata.ID == req.ID {
+			switch req.Action {
+			case "add", "update":
+				for key, value := range req.CustomMetadata {
+					metadata.CustomMetadata[key] = value
+				}
+			case "delete":
+				for key := range req.CustomMetadata {
+					delete(metadata.CustomMetadata, key)
+				}
+			default:
+				http.Error(w, "Invalid action", http.StatusBadRequest)
+				return
+			}
+			metadataList[i] = metadata
+			updated = true
+			break
+		}
+	}
+
+	if !updated {
+		http.Error(w, "File not found", http.StatusNotFound)
+		return
+	}
+
+	// Write updated metadata back to the same file
+	file, err = os.Create(metadataFile)
+	if err != nil {
+		http.Error(w, "Failed to save metadata", http.StatusInternalServerError)
+		return
+	}
+	defer file.Close()
+
+	if err := json.NewEncoder(file).Encode(metadataList); err != nil {
+		http.Error(w, "Failed to encode metadata", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "Custom metadata updated successfully")
+}
 
 func UploadHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -36,6 +179,9 @@ func UploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Compute file hash
+	fileHash := computeHash(fileBytes)
+
 	// Encrypt file content
 	encryptedBytes, err := utils.Encrypt(fileBytes, utils.EncryptionKey)
 	if err != nil {
@@ -62,11 +208,75 @@ func UploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Save metadata
+	metadata := FileMetadata{
+		ID:           generateUniqueID(),
+		Filename:     header.Filename,
+		BucketName:   bucketName,
+		UploadTime:   time.Now().Format(time.RFC3339),
+		ContentType:  header.Header.Get("Content-Type"),
+		Size:         header.Size,
+		Hash:         fileHash,
+		Owner:        "user123", // Replace with actual user information
+		Tags:         []string{"example", "file"},
+		Description:  "This is an example file",
+		Version:      "1.0",
+		Permissions:  "rw-r--r--",
+		Checksum:     computeHash(fileBytes), // Use the same hash function for checksum
+		LastAccessed: time.Now().Format(time.RFC3339),
+		Expiration:   "", // Set if applicable
+		CustomMetadata: map[string]string{
+			"customField1": "value1",
+			"customField2": "value2",
+		},
+	}
+
+	if err := saveMetadata(metadata); err != nil {
+		http.Error(w, "Failed to save metadata", http.StatusInternalServerError)
+		return
+	}
+
 	// Asynchronously replicate the file to the replica buckets
 	go utils.ReplicateFile(bucketName, header.Filename, encryptedBytes)
 
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(w, "File uploaded successfully: %s\n", header.Filename)
+}
+
+func SearchHandler(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query().Get("query")
+	if query == "" {
+		http.Error(w, "Query is required", http.StatusBadRequest)
+		return
+	}
+
+	var metadataList []FileMetadata
+
+	// Read metadata
+	file, err := os.Open(metadataFile)
+	if err != nil {
+		http.Error(w, "Failed to read metadata", http.StatusInternalServerError)
+		return
+	}
+	defer file.Close()
+
+	if err := json.NewDecoder(file).Decode(&metadataList); err != nil {
+		http.Error(w, "Failed to decode metadata", http.StatusInternalServerError)
+		return
+	}
+
+	// Search for matching files
+	var results []FileMetadata
+	for _, metadata := range metadataList {
+		if metadata.Filename == query || metadata.BucketName == query {
+			results = append(results, metadata)
+		}
+	}
+
+	if err := json.NewEncoder(w).Encode(results); err != nil {
+		http.Error(w, "Failed to encode results", http.StatusInternalServerError)
+		return
+	}
 }
 
 func DownloadHandler(w http.ResponseWriter, r *http.Request) {
