@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 )
 
-const storageDir = "./storage"
+const storageDir = "../../storage"
 
 // List of buckets for replication
 var replicationBuckets = []string{"replica1", "replica2"}

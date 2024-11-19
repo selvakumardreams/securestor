@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +12,9 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/anchore/syft/syft"
+	"github.com/anchore/syft/syft/format"
+	"github.com/anchore/syft/syft/format/syftjson"
 	"github.com/google/uuid"
 	"github.com/selvakumardreams/bluenoise/internal/utils"
 )
@@ -40,7 +44,7 @@ type CustomMetadataRequest struct {
 	Action         string            `json:"action"` // "add", "update", "delete"
 }
 
-var metadataFile = filepath.Join("storage", "metadata.json")
+var metadataFile = filepath.Join(storageDir, "metadata.json")
 
 func computeHash(data []byte) string {
 	hash := sha256.Sum256(data)
@@ -153,6 +157,43 @@ func UpdateCustomMetadataHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "Custom metadata updated successfully")
 }
 
+func generateSBOM(filePath string) (string, error) {
+
+	// Get the source
+	src, err := syft.GetSource(context.Background(), filePath, nil)
+	if err != nil {
+		panic(err)
+	}
+
+	// Generate the SBOM
+	sbom, err := syft.CreateSBOM(context.Background(), src, nil)
+	if err != nil {
+		panic(err)
+	}
+
+	// Define the SBOM file path
+	sbomFilePath := filePath + ".sbom.json"
+
+	// Create the SBOM file
+	sbomFile, err := os.Create(sbomFilePath)
+	if err != nil {
+		return "", err
+	}
+	defer sbomFile.Close()
+
+	bytes, err := format.Encode(*sbom, syftjson.NewFormatEncoder())
+	if err != nil {
+		panic(err)
+	}
+
+	// Write the SBOM to the file
+	if _, err := sbomFile.Write(bytes); err != nil {
+		return "", err
+	}
+
+	return sbomFilePath, nil
+}
+
 func UploadHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
@@ -172,22 +213,46 @@ func UploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	// Read file content
-	fileBytes, err := io.ReadAll(file)
+	// Save the uploaded file to a temporary location
+	tempFilePath := filepath.Join(storageDir, header.Filename)
+	tempFile, err := os.Create(tempFilePath)
 	if err != nil {
-		http.Error(w, "Failed to read file", http.StatusInternalServerError)
+		http.Error(w, "Failed to create temporary file", http.StatusInternalServerError)
 		return
 	}
 
+	if _, err := io.Copy(tempFile, file); err != nil {
+		tempFile.Close()
+		os.Remove(tempFilePath)
+		http.Error(w, "Failed to save temporary file", http.StatusInternalServerError)
+		return
+	}
+
+	tempFile.Close()
+	defer os.Remove(tempFilePath) // Ensure the temporary file is removed
+
 	// Compute file hash
+	fileBytes, err := os.ReadFile(tempFilePath)
+	if err != nil {
+		http.Error(w, "Failed to read temporary file", http.StatusInternalServerError)
+		return
+	}
 	fileHash := computeHash(fileBytes)
 
-	// Encrypt file content
-	encryptedBytes, err := utils.Encrypt(fileBytes, utils.EncryptionKey)
+	// Generate SBOM for the uploaded file
+	sbomFilePath, err := generateSBOM(tempFilePath)
 	if err != nil {
+		http.Error(w, "Failed to generate SBOM", http.StatusInternalServerError)
+		return
+	}
+
+	// Encrypt the file content
+	encryptedFilePath := tempFilePath + ".enc"
+	if err := utils.EncryptFile(tempFilePath, encryptedFilePath, []byte(utils.EncryptionKey)); err != nil {
 		http.Error(w, "Failed to encrypt file", http.StatusInternalServerError)
 		return
 	}
+	defer os.Remove(encryptedFilePath) // Clean up the encrypted file
 
 	// Save encrypted file to the main bucket
 	bucketPath := filepath.Join(storageDir, bucketName)
@@ -203,8 +268,15 @@ func UploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer dst.Close()
 
-	if _, err := dst.Write(encryptedBytes); err != nil {
-		http.Error(w, "Failed to save file", http.StatusInternalServerError)
+	encryptedFile, err := os.Open(encryptedFilePath)
+	if err != nil {
+		http.Error(w, "Failed to open encrypted file", http.StatusInternalServerError)
+		return
+	}
+	defer encryptedFile.Close()
+
+	if _, err := io.Copy(dst, encryptedFile); err != nil {
+		http.Error(w, "Failed to save encrypted file", http.StatusInternalServerError)
 		return
 	}
 
@@ -228,6 +300,7 @@ func UploadHandler(w http.ResponseWriter, r *http.Request) {
 		CustomMetadata: map[string]string{
 			"customField1": "value1",
 			"customField2": "value2",
+			"sbomFilePath": sbomFilePath,
 		},
 	}
 
@@ -237,7 +310,7 @@ func UploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Asynchronously replicate the file to the replica buckets
-	go utils.ReplicateFile(bucketName, header.Filename, encryptedBytes)
+	go utils.ReplicateFile(bucketName, header.Filename, fileBytes)
 
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(w, "File uploaded successfully: %s\n", header.Filename)

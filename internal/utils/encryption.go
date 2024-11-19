@@ -6,9 +6,71 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
+	"os"
 )
 
 const EncryptionKey = "Yf90Frf3DorOqeDfK4VGRIeQfGKUgkle" // 32 bytes key for AES-256
+
+func EncryptFile(inputFilePath, outputFilePath string, key []byte) error {
+	inputFile, err := os.Open(inputFilePath)
+	if err != nil {
+		return err
+	}
+	defer inputFile.Close()
+
+	outputFile, err := os.Create(outputFilePath)
+	if err != nil {
+		return err
+	}
+	defer outputFile.Close()
+
+	// Generate a new AES cipher using the key
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return err
+	}
+
+	// Generate a new GCM (Galois/Counter Mode) cipher
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return err
+	}
+
+	// Create a nonce of the appropriate size
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return err
+	}
+
+	// Write the nonce to the output file
+	if _, err := outputFile.Write(nonce); err != nil {
+		return err
+	}
+
+	// Create a buffer to hold chunks of the file
+	buffer := make([]byte, 1024*1024) // 1 MB buffer
+
+	for {
+		// Read a chunk from the input file
+		n, err := inputFile.Read(buffer)
+		if err != nil && err != io.EOF {
+			return err
+		}
+		if n == 0 {
+			break
+		}
+
+		// Encrypt the chunk
+		encryptedChunk := gcm.Seal(nil, nonce, buffer[:n], nil)
+
+		// Write the encrypted chunk to the output file
+		if _, err := outputFile.Write(encryptedChunk); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
 
 func Encrypt(data []byte, passphrase string) ([]byte, error) {
 	block, _ := aes.NewCipher([]byte(passphrase))
