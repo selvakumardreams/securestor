@@ -5,7 +5,13 @@ Bluenoise is an open source tool for high performance object storage and managem
 1. Run the Server: Start the server by running the following command in your project directory.
 
 ```go
+cd cmd\server
 go run main.go
+```
+
+```npm
+cd frontend
+npm run start-legacy
 ```
 
 2. Create a Bucket: Use curl or a similar tool to create a bucket.
