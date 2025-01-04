@@ -46,6 +46,8 @@ type CustomMetadataRequest struct {
 
 var metadataFile = filepath.Join(storageDir, "metadata.json")
 
+var enableEncryption = false
+
 func computeHash(data []byte) string {
 	hash := sha256.Sum256(data)
 	return hex.EncodeToString(hash[:])
@@ -246,13 +248,19 @@ func UploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Encrypt the file content
-	encryptedFilePath := tempFilePath + ".enc"
-	if err := utils.EncryptFile(tempFilePath, encryptedFilePath, []byte(utils.EncryptionKey)); err != nil {
-		http.Error(w, "Failed to encrypt file", http.StatusInternalServerError)
-		return
+	var finalFilePath string
+	if enableEncryption {
+		// Encrypt the file content
+		encryptedFilePath := tempFilePath + ".enc"
+		if err := utils.EncryptFile(tempFilePath, encryptedFilePath, []byte(utils.EncryptionKey)); err != nil {
+			http.Error(w, "Failed to encrypt file", http.StatusInternalServerError)
+			return
+		}
+		defer os.Remove(encryptedFilePath) // Clean up the encrypted file
+		finalFilePath = encryptedFilePath
+	} else {
+		finalFilePath = tempFilePath
 	}
-	defer os.Remove(encryptedFilePath) // Clean up the encrypted file
 
 	// Save encrypted file to the main bucket
 	bucketPath := filepath.Join(storageDir, bucketName)
@@ -268,17 +276,20 @@ func UploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer dst.Close()
 
-	encryptedFile, err := os.Open(encryptedFilePath)
+	finalFile, err := os.Open(finalFilePath)
 	if err != nil {
 		http.Error(w, "Failed to open encrypted file", http.StatusInternalServerError)
 		return
 	}
-	defer encryptedFile.Close()
+	defer finalFile.Close()
 
-	if _, err := io.Copy(dst, encryptedFile); err != nil {
+	if _, err := io.Copy(dst, finalFile); err != nil {
 		http.Error(w, "Failed to save encrypted file", http.StatusInternalServerError)
 		return
 	}
+
+	// Automatically generate the description
+	description := fmt.Sprintf("File %s uploaded to bucket %s on %s", header.Filename, bucketName, time.Now().Format(time.RFC3339))
 
 	// Save metadata
 	metadata := FileMetadata{
@@ -291,7 +302,7 @@ func UploadHandler(w http.ResponseWriter, r *http.Request) {
 		Hash:         fileHash,
 		Owner:        "user123", // Replace with actual user information
 		Tags:         []string{"example", "file"},
-		Description:  "This is an example file",
+		Description:  description,
 		Version:      "1.0",
 		Permissions:  "rw-r--r--",
 		Checksum:     computeHash(fileBytes), // Use the same hash function for checksum
@@ -373,23 +384,34 @@ func DownloadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	// Read encrypted file content
-	encryptedBytes, err := io.ReadAll(file)
-	if err != nil {
-		http.Error(w, "Failed to read file", http.StatusInternalServerError)
-		return
-	}
+	var fileBytes []byte
 
-	// Decrypt file content
-	decryptedBytes, err := utils.Decrypt(encryptedBytes, utils.EncryptionKey)
-	if err != nil {
-		http.Error(w, "Failed to decrypt file", http.StatusInternalServerError)
-		return
+	if enableEncryption {
+		// Read encrypted file content
+		encryptedBytes, err := io.ReadAll(file)
+		if err != nil {
+			http.Error(w, "Failed to read file", http.StatusInternalServerError)
+			return
+		}
+
+		// Decrypt file content
+		fileBytes, err = utils.Decrypt(encryptedBytes, utils.EncryptionKey)
+		if err != nil {
+			http.Error(w, "Failed to decrypt file", http.StatusInternalServerError)
+			return
+		}
+	} else {
+		// Read file content
+		fileBytes, err = io.ReadAll(file)
+		if err != nil {
+			http.Error(w, "Failed to read file", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s", filename))
 	w.Header().Set("Content-Type", "application/octet-stream")
-	if _, err := w.Write(decryptedBytes); err != nil {
+	if _, err := w.Write(fileBytes); err != nil {
 		http.Error(w, "Failed to download file", http.StatusInternalServerError)
 		return
 	}
