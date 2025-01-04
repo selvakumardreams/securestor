@@ -23,14 +23,25 @@ function App() {
 }
 
 const Dashboard = () => (
-  <div>
-    <h1>Bluenoise</h1>
-    <CreateBucket />
-    <UploadFile />
-    <DownloadFile />
-    <ListFiles />
-    <DeleteFile />
-    <HealthCheck />
+  <div className="dashboard">
+    <header className="header">
+      <h1>Bluenoise</h1>
+    </header>
+    <div className="content">
+      <div className="top-right">
+        <CreateBucket />
+        <UploadFile />
+        <DownloadFile />
+        <DeleteFile />
+        <HealthCheck />
+      </div>
+      <div className="center">
+        <ListFiles />
+      </div>
+    </div>
+    <footer className="footer">
+      <p>Bluenoise</p>
+    </footer>
   </div>
 );
 
